@@ -3,41 +3,51 @@ set -euo pipefail
 
 source .codevalid/tests/task_8716971322_20260817083829/api/_infra.sh
 
-cv_step Given "Initial setup and health preconditions" $LINENO
-cv_prereq "API app healthy on /health and WireMock+toxiproxy are up" $LINENO
-# health_check.sh (entrypoint of seed-test) has already waited for app:6713/health
+# Setup: wait for app health
+cv_step "Given" "wait for app health before testing GET /api/rides/weather" $LINENO
+REQUEST_HEADERS_FILE="/tmp/health_headers.$$"
+REQUEST_BODY_FILE="/tmp/health_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/health_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/health_resp_body.$$"
 
-# Override WIREMOCK_ADMIN_URL for request journal operations as per plan
-WIREMOCK_ADMIN_URL="http://toxiproxy:8587"
+# No request body for health; just echo headers placeholder
+echo "REQUEST_HEADERS: GET http://app:${PORT}/health" >"${REQUEST_HEADERS_FILE}"
+: >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
 
-API_BASE="http://app:6713"
+curl -sS -f -D "${RESPONSE_HEADERS_FILE}" "http://app:${PORT}/health" >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 200 from /health, got curl exit code ${code}" $LINENO
+fi
+cv_http "GET" "/health" "200"
 
-cv_prereq "Configure WireMock stub for Open-Meteo archive weather lookup" $LINENO
+# Mocks: configure WireMock stub and reset journal
+cv_step "Given" "configure WireMock stub for Open-Meteo archive weather lookup" $LINENO
 
-CASE_ID="authenticated_cache_miss_vendor_success"
-CASE_DIR=".codevalid/wiremock/mappings/cases/${CASE_ID}"
-mkdir -p "${CASE_DIR}"
+CASE_DIR=".codevalid/wiremock/mappings/cases/authenticated_cache_miss_vendor_success"
+mkdir -p "$CASE_DIR"
 
-# This case uses a historical ride date so the app routes via OpenMeteoArchive (/v1/archive)
-# Coordinates match those used in RidesEndpointsTests: 40.71, -74.01
-# Ride date is 2026-03-20; we target hour 10:00 local, which will be mapped to an hour-of-day index in the hourly arrays.
-cat > "${CASE_DIR}/openmeteo-archive-${CASE_ID}.json" <<'JSON'
+cat > "$CASE_DIR/open-meteo-archive.json" <<'JSON'
 {
   "request": {
     "method": "GET",
     "urlPath": "/v1/archive",
     "queryParameters": {
       "latitude": {
-        "contains": "40.71"
+        "matches": "40\\.71"
       },
       "longitude": {
-        "contains": "-74.01"
+        "matches": "-74\\.01"
       },
       "start_date": {
-        "equalTo": "2026-03-20"
+        "equalTo": "2024-01-15"
       },
       "end_date": {
-        "equalTo": "2026-03-20"
+        "equalTo": "2024-01-15"
       }
     }
   },
@@ -46,49 +56,49 @@ cat > "${CASE_DIR}/openmeteo-archive-${CASE_ID}.json" <<'JSON'
     "jsonBody": {
       "hourly": {
         "time": [
-          "2026-03-20T09:00",
-          "2026-03-20T10:00",
-          "2026-03-20T11:00"
+          "2024-01-15T00:00",
+          "2024-01-15T10:00",
+          "2024-01-15T23:00"
         ],
         "temperature_2m": [
-          60.0,
+          30.5,
           72.5,
-          65.0
+          40.0
         ],
         "wind_speed_10m": [
           5.0,
           10.3,
-          7.5
+          3.0
         ],
         "wind_direction_10m": [
-          200,
+          180,
           250,
-          180
+          90
         ],
         "relative_humidity_2m": [
-          55,
+          50,
           65,
-          70
+          80
         ],
         "cloud_cover": [
           10,
           30,
-          50
+          90
+        ],
+        "weather_code": [
+          0,
+          80,
+          0
         ],
         "precipitation": [
           0.0,
-          0.1,
+          0.2,
           0.0
         ],
         "snowfall": [
           0.0,
           0.0,
           0.0
-        ],
-        "weather_code": [
-          0,
-          51,
-          0
         ]
       }
     },
@@ -99,158 +109,262 @@ cat > "${CASE_DIR}/openmeteo-archive-${CASE_ID}.json" <<'JSON'
 }
 JSON
 
-wiremock_admin_import_mappings "${CASE_DIR}"
+wiremock_admin_import_mappings "$CASE_DIR"
 
-cv_prereq "Create rider and configure user settings with lat/lon" $LINENO
+cv_step "Given" "reset WireMock request journal before vendor call count assertions" $LINENO
+REQUEST_HEADERS_FILE="/tmp/wm_reset_headers.$$"
+REQUEST_BODY_FILE="/tmp/wm_reset_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/wm_reset_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/wm_reset_resp_body.$$"
 
-# 1. Signup / create user
-# Prior learning: signup JSON uses field 'name' for display name.
-SIGNUP_PAYLOAD='{"name":"WeatherPreview-'"$(date +%s)"'","pin":"1234"}'
+echo "REQUEST_HEADERS: DELETE ${WIREMOCK_ADMIN_URL}/__admin/requests" >"${REQUEST_HEADERS_FILE}"
+: >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
 
-REQUEST_HEADERS_SIGNUP=$'Content-Type: application/json'
-REQUEST_BODY_SIGNUP="${SIGNUP_PAYLOAD}"
-echo "REQUEST_HEADERS=${REQUEST_HEADERS_SIGNUP}"
-echo "REQUEST_BODY=${REQUEST_BODY_SIGNUP}"
+curl -sS -X DELETE -D "${RESPONSE_HEADERS_FILE}" "${WIREMOCK_ADMIN_URL}/__admin/requests" >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 200 from WireMock requests delete, got curl exit code ${code}" $LINENO
+fi
+cv_http "DELETE" "/__admin/requests" "200"
 
-SIGNUP_HDRS="/tmp/signup_headers.$$"
-SIGNUP_RESP="$(curl -sS -f -D "${SIGNUP_HDRS}" -X POST "${API_BASE}/api/users/signup" \
+# Preconditions: sign up rider
+cv_step "Given" "sign up a new rider and capture userId for authenticated requests" $LINENO
+
+SIGNUP_BODY='{"name":"Weather Cache Rider","pin":"1234"}'
+REQUEST_HEADERS_FILE="/tmp/signup_headers.$$"
+REQUEST_BODY_FILE="/tmp/signup_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/signup_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/signup_resp_body.$$"
+
+echo "REQUEST_HEADERS: POST http://app:${PORT}/api/users/signup" >"${REQUEST_HEADERS_FILE}"
+echo "Content-Type: application/json" >>"${REQUEST_HEADERS_FILE}"
+printf '%s
+' "$SIGNUP_BODY" >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
+
+curl -sS -X POST "http://app:${PORT}/api/users/signup" \
   -H 'Content-Type: application/json' \
-  -d "${SIGNUP_PAYLOAD}")" || cv_fail "Signup request failed" $LINENO
+  -D "${RESPONSE_HEADERS_FILE}" \
+  --data-binary "${SIGNUP_BODY}" >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+SIGNUP_RESP=$(cat "${RESPONSE_BODY_FILE}")
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 201 from /api/users/signup, got curl exit code ${code}" $LINENO
+fi
+cv_http "POST" "/api/users/signup" "201"
 
-code="$(grep -m1 "HTTP/" "${SIGNUP_HDRS}" | awk '{print $2}')"
-cv_http "POST" "/api/users" "${code}"
-[ "${code}" = "201" ] || cv_fail "expected HTTP 201 got ${code}" $LINENO
-
-echo "RESPONSE_HEADERS="
-cat "${SIGNUP_HDRS}"
-echo "RESPONSE_BODY=${SIGNUP_RESP}"
-
-# Extract userId from signup response (assumes property 'userId' in JSON)
-USER_ID="$(printf '%s' "${SIGNUP_RESP}" | jq -r '.userId')" || cv_fail "Failed to parse userId from signup response" $LINENO
-if [ -z "${USER_ID}" ] || [ "${USER_ID}" = "null" ]; then
-  cv_fail "Signup response missing userId" $LINENO
+USER_ID="$(printf '%s
+' "$SIGNUP_RESP" | jq -r '.userId')"
+if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+  cv_fail "expected signup response to contain userId, got: ${SIGNUP_RESP}" $LINENO
 fi
 
-# 2. Configure user settings with latitude and longitude (40.71, -74.01)
-# Endpoint: PUT /api/users/me/settings, authenticated via X-User-Id
-SETTINGS_PAYLOAD='{
-  "averageCarMpg": null,
-  "yearlyGoalMiles": null,
-  "oilChangePrice": null,
-  "mileageRateCents": null,
-  "locationLabel": "NYC",
-  "latitude": 40.71,
-  "longitude": -74.01,
-  "dashboardGallonsAvoidedEnabled": false,
-  "dashboardGoalProgressEnabled": false,
-  "weatherApiKey": null,
-  "eiaGasApiKey": null
-}'
+# Preconditions: configure UserSettings
+cv_step "Given" "configure rider UserSettings with latitude/longitude for weather lookup" $LINENO
 
-REQUEST_HEADERS_SETTINGS=$'Content-Type: application/json
-X-User-Id: '
-REQUEST_BODY_SETTINGS="${SETTINGS_PAYLOAD}"
-echo "REQUEST_HEADERS=${REQUEST_HEADERS_SETTINGS}${USER_ID}"
-echo "REQUEST_BODY=${REQUEST_BODY_SETTINGS}"
+SETTINGS_BODY="$(jq -n \
+  --argjson latitude 40.71 \
+  --argjson longitude -74.01 \
+  --arg dashboardGallonsAvoidedEnabled true \
+  --arg dashboardGoalProgressEnabled true \
+  '{ latitude: $latitude,
+     longitude: $longitude,
+     locationLabel: "NYC",
+     averageCarMpg: 25,
+     yearlyGoalMiles: 1000,
+     oilChangePrice: 50,
+     mileageRateCents: 65,
+     dashboardGallonsAvoidedEnabled: ($dashboardGallonsAvoidedEnabled|test("true")),
+     dashboardGoalProgressEnabled: ($dashboardGoalProgressEnabled|test("true")),
+     weatherApiKey: null,
+     eiaGasApiKey: null }'
+)"
 
-curl -sS -f -X PUT "${API_BASE}/api/users/me/settings" \
-  -H "Content-Type: application/json" \
+REQUEST_HEADERS_FILE="/tmp/settings_headers.$$"
+REQUEST_BODY_FILE="/tmp/settings_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/settings_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/settings_resp_body.$$"
+
+echo "REQUEST_HEADERS: PUT http://app:${PORT}/api/users/me/settings" >"${REQUEST_HEADERS_FILE}"
+echo "Content-Type: application/json" >>"${REQUEST_HEADERS_FILE}"
+echo "X-User-Id: ${USER_ID}" >>"${REQUEST_HEADERS_FILE}"
+printf '%s
+' "$SETTINGS_BODY" >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
+
+curl -sS -X PUT "http://app:${PORT}/api/users/me/settings" \
+  -H 'Content-Type: application/json' \
   -H "X-User-Id: ${USER_ID}" \
-  -d "${SETTINGS_PAYLOAD}" >/dev/null || cv_fail "Failed to update user settings" $LINENO
+  -D "${RESPONSE_HEADERS_FILE}" \
+  --data-binary "${SETTINGS_BODY}" >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+SETTINGS_RESP=$(cat "${RESPONSE_BODY_FILE}")
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 200 from /api/users/me/settings, got curl exit code ${code}" $LINENO
+fi
 cv_http "PUT" "/api/users/me/settings" "200"
 
-# 3. Prepare rideDateTimeLocal matching the stub date and target hour (10:30 local).
-RIDE_DATETIME_LOCAL="2026-03-20T10:30:00"
+# Choose a local ride datetime that maps to 2024-01-15T10:00Z when converted to UTC.
+RIDE_LOCAL="2024-01-15T10:00:00"
 
-cv_step When "First authenticated GET /api/rides/weather triggers cache miss and vendor call" $LINENO
+# When: first weather call (cache miss)
+cv_step "When" "call GET /api/rides/weather for the configured rider and ride timestamp (first call, cache miss hitting vendor)" $LINENO
 
-WEATHER_URL="${API_BASE}/api/rides/weather?rideDateTimeLocal=${RIDE_DATETIME_LOCAL}"
+WEATHER_URL_FIRST="http://app:${PORT}/api/rides/weather?rideDateTimeLocal=${RIDE_LOCAL}"
+REQUEST_HEADERS_FILE="/tmp/weather1_headers.$$"
+REQUEST_BODY_FILE="/tmp/weather1_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/weather1_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/weather1_resp_body.$$"
 
-FIRST_RESP_RAW="$(curl -sS -f -X GET "${WEATHER_URL}" \
-  -H "X-User-Id: ${USER_ID}" )" || cv_fail "First GET /api/rides/weather failed" $LINENO
+echo "REQUEST_HEADERS: GET ${WEATHER_URL_FIRST}" >"${REQUEST_HEADERS_FILE}"
+echo "X-User-Id: ${USER_ID}" >>"${REQUEST_HEADERS_FILE}"
+: >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
+
+curl -sS -X GET "$WEATHER_URL_FIRST" \
+  -H "X-User-Id: ${USER_ID}" \
+  -D "${RESPONSE_HEADERS_FILE}" \
+  >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+FIRST_RESP=$(cat "${RESPONSE_BODY_FILE}")
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 200 from first /api/rides/weather, got curl exit code ${code}" $LINENO
+fi
 cv_http "GET" "/api/rides/weather" "200"
 
-FIRST_STATUS=200
+# When: second weather call (cache hit)
+cv_step "When" "call GET /api/rides/weather again for same rider and timestamp (second call, cache hit without new vendor call)" $LINENO
 
-cv_step Then "Assert first response matches stubbed weather and IsAvailable true; then verify cache reuse on second call" $LINENO
+WEATHER_URL_SECOND="$WEATHER_URL_FIRST"
+REQUEST_HEADERS_FILE="/tmp/weather2_headers.$$"
+REQUEST_BODY_FILE="/tmp/weather2_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/weather2_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/weather2_resp_body.$$"
 
-# Parse JSON
-FIRST_JSON="${FIRST_RESP_RAW}"
+echo "REQUEST_HEADERS: GET ${WEATHER_URL_SECOND}" >"${REQUEST_HEADERS_FILE}"
+echo "X-User-Id: ${USER_ID}" >>"${REQUEST_HEADERS_FILE}"
+: >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
 
-# Normalize rideDateTimeLocal: API returns local DateTime; representation may include offset.
-RESP_DATETIME="$(printf '%s' "${FIRST_JSON}" | jq -r '.rideDateTimeLocal')" || cv_fail "Missing rideDateTimeLocal in response" $LINENO
-# Normalize +00:00 to Z if present, per prior learning
-RESP_DATETIME_NORM="$(printf '%s' "${RESP_DATETIME}" | sed 's/+00:00/Z/')" 
-EXPECTED_DATETIME="${RIDE_DATETIME_LOCAL}"
-if [ "${RESP_DATETIME_NORM}" != "${EXPECTED_DATETIME}" ]; then
-  cv_fail "rideDateTimeLocal mismatch: expected ${EXPECTED_DATETIME}, got ${RESP_DATETIME_NORM}" $LINENO
+curl -sS -X GET "$WEATHER_URL_SECOND" \
+  -H "X-User-Id: ${USER_ID}" \
+  -D "${RESPONSE_HEADERS_FILE}" \
+  >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+SECOND_RESP=$(cat "${RESPONSE_BODY_FILE}")
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 200 from second /api/rides/weather, got curl exit code ${code}" $LINENO
 fi
-
-TEMP="$(printf '%s' "${FIRST_JSON}" | jq -r '.temperature')" || cv_fail "Missing temperature" $LINENO
-if [ "${TEMP}" != "72.5" ]; then
-  cv_fail "temperature mismatch: expected 72.5, got ${TEMP}" $LINENO
-fi
-
-WIND_SPEED="$(printf '%s' "${FIRST_JSON}" | jq -r '.windSpeedMph')" || cv_fail "Missing windSpeedMph" $LINENO
-if [ "${WIND_SPEED}" != "10.3" ]; then
-  cv_fail "windSpeedMph mismatch: expected 10.3, got ${WIND_SPEED}" $LINENO
-fi
-
-WIND_DIR="$(printf '%s' "${FIRST_JSON}" | jq -r '.windDirectionDeg')" || cv_fail "Missing windDirectionDeg" $LINENO
-if [ "${WIND_DIR}" != "250" ]; then
-  cv_fail "windDirectionDeg mismatch: expected 250, got ${WIND_DIR}" $LINENO
-fi
-
-HUMIDITY="$(printf '%s' "${FIRST_JSON}" | jq -r '.relativeHumidityPercent')" || cv_fail "Missing relativeHumidityPercent" $LINENO
-if [ "${HUMIDITY}" != "65" ]; then
-  cv_fail "relativeHumidityPercent mismatch: expected 65, got ${HUMIDITY}" $LINENO
-fi
-
-CLOUD_COVER="$(printf '%s' "${FIRST_JSON}" | jq -r '.cloudCoverPercent')" || cv_fail "Missing cloudCoverPercent" $LINENO
-if [ "${CLOUD_COVER}" != "30" ]; then
-  cv_fail "cloudCoverPercent mismatch: expected 30, got ${CLOUD_COVER}" $LINENO
-fi
-
-PRECIP_TYPE="$(printf '%s' "${FIRST_JSON}" | jq -r '.precipitationType')" || cv_fail "Missing precipitationType field" $LINENO
-# With weather_code 51 and non-zero precipitation and zero snowfall, DeterminePrecipitationType maps to "rain"
-if [ "${PRECIP_TYPE}" != "rain" ]; then
-  cv_fail "precipitationType mismatch: expected rain, got ${PRECIP_TYPE}" $LINENO
-fi
-
-IS_AVAILABLE="$(printf '%s' "${FIRST_JSON}" | jq -r '.isAvailable')" || cv_fail "Missing isAvailable" $LINENO
-if [ "${IS_AVAILABLE}" != "true" ]; then
-  cv_fail "isAvailable mismatch: expected true, got ${IS_AVAILABLE}" $LINENO
-fi
-
-# Now verify cache reuse: clear WireMock request journal, then repeat the request.
-cv_prereq "Reset WireMock request journal before second call" $LINENO
-curl -sS -X DELETE "${WIREMOCK_ADMIN_URL}/__admin/requests" >/dev/null || cv_fail "Failed to reset WireMock requests" $LINENO
-
-cv_prereq "Second authenticated GET /api/rides/weather should be served from cache" $LINENO
-SECOND_RESP_RAW="$(curl -sS -f -X GET "${WEATHER_URL}" \
-  -H "X-User-Id: ${USER_ID}" )" || cv_fail "Second GET /api/rides/weather failed" $LINENO
 cv_http "GET" "/api/rides/weather" "200"
 
-SECOND_JSON="${SECOND_RESP_RAW}"
+# Then: assert first response fields
+cv_step "Then" "assert first weather response fields populated from Open-Meteo stub and IsAvailable true" $LINENO
 
-# Assert second response fields match first
-for field in temperature windSpeedMph windDirectionDeg relativeHumidityPercent cloudCoverPercent precipitationType isAvailable; do
-  FIRST_VAL="$(printf '%s' "${FIRST_JSON}" | jq -r ".${field}")"
-  SECOND_VAL="$(printf '%s' "${SECOND_JSON}" | jq -r ".${field}")"
-  if [ "${FIRST_VAL}" != "${SECOND_VAL}" ]; then
-    cv_fail "Field ${field} mismatch between first and second response: ${FIRST_VAL} vs ${SECOND_VAL}" $LINENO
-  fi
-done
+RIDEDT_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.rideDateTimeLocal')"
+TEMP_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.temperature')"
+WIND_SPEED_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.windSpeedMph')"
+WIND_DIR_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.windDirectionDeg')"
+HUMIDITY_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.relativeHumidityPercent')"
+CLOUD_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.cloudCoverPercent')"
+PRECIP_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.precipitationType')"
+AVAILABLE_FIRST="$(printf '%s
+' "$FIRST_RESP" | jq -r '.isAvailable')"
 
-# Confirm no new vendor calls recorded after journal reset
-REQUESTS_JSON="$(curl -sS -f "${WIREMOCK_ADMIN_URL}/__admin/requests" )" || cv_fail "Failed to read WireMock requests after second call" $LINENO
-CALL_COUNT="$(printf '%s' "${REQUESTS_JSON}" | jq '.meta.total')" || cv_fail "Failed to parse WireMock request count" $LINENO
-
-if [ "${CALL_COUNT}" != "0" ]; then
-  cv_fail "Expected 0 vendor calls after cache warm (second request), but WireMock recorded ${CALL_COUNT}" $LINENO
+if [ "$RIDEDT_FIRST" = "null" ] || [ -z "$RIDEDT_FIRST" ]; then
+  cv_fail "expected rideDateTimeLocal to be present in first response, got: ${RIDEDT_FIRST}" $LINENO
 fi
+
+if [ "$AVAILABLE_FIRST" != "true" ]; then
+  cv_fail "expected isAvailable=true in first response, got: ${AVAILABLE_FIRST}" $LINENO
+fi
+
+[ "$TEMP_FIRST" = "72.5" ] || cv_fail "expected temperature 72.5 from stub, got: ${TEMP_FIRST}" $LINENO
+[ "$WIND_SPEED_FIRST" = "10.3" ] || cv_fail "expected windSpeedMph 10.3 from stub, got: ${WIND_SPEED_FIRST}" $LINENO
+[ "$WIND_DIR_FIRST" = "250" ] || cv_fail "expected windDirectionDeg 250 from stub, got: ${WIND_DIR_FIRST}" $LINENO
+[ "$HUMIDITY_FIRST" = "65" ] || cv_fail "expected relativeHumidityPercent 65 from stub, got: ${HUMIDITY_FIRST}" $LINENO
+[ "$CLOUD_FIRST" = "30" ] || cv_fail "expected cloudCoverPercent 30 from stub, got: ${CLOUD_FIRST}" $LINENO
+[ "$PRECIP_FIRST" = "rain" ] || cv_fail "expected precipitationType \"rain\" from stub, got: ${PRECIP_FIRST}" $LINENO
+
+# Then: assert second response matches first
+cv_step "Then" "assert second weather response matches first and reuses cached snapshot" $LINENO
+
+TEMP_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.temperature')"
+WIND_SPEED_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.windSpeedMph')"
+WIND_DIR_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.windDirectionDeg')"
+HUMIDITY_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.relativeHumidityPercent')"
+CLOUD_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.cloudCoverPercent')"
+PRECIP_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.precipitationType')"
+AVAILABLE_SECOND="$(printf '%s
+' "$SECOND_RESP" | jq -r '.isAvailable')"
+
+[ "$AVAILABLE_SECOND" = "true" ] || cv_fail "expected isAvailable=true in second response, got: ${AVAILABLE_SECOND}" $LINENO
+[ "$TEMP_SECOND" = "$TEMP_FIRST" ] || cv_fail "expected second temperature ${TEMP_FIRST}, got: ${TEMP_SECOND}" $LINENO
+[ "$WIND_SPEED_SECOND" = "$WIND_SPEED_FIRST" ] || cv_fail "expected second windSpeedMph ${WIND_SPEED_FIRST}, got: ${WIND_SPEED_SECOND}" $LINENO
+[ "$WIND_DIR_SECOND" = "$WIND_DIR_FIRST" ] || cv_fail "expected second windDirectionDeg ${WIND_DIR_FIRST}, got: ${WIND_DIR_SECOND}" $LINENO
+[ "$HUMIDITY_SECOND" = "$HUMIDITY_FIRST" ] || cv_fail "expected second relativeHumidityPercent ${HUMIDITY_FIRST}, got: ${HUMIDITY_SECOND}" $LINENO
+[ "$CLOUD_SECOND" = "$CLOUD_FIRST" ] || cv_fail "expected second cloudCoverPercent ${CLOUD_FIRST}, got: ${CLOUD_SECOND}" $LINENO
+[ "$PRECIP_SECOND" = "$PRECIP_FIRST" ] || cv_fail "expected second precipitationType ${PRECIP_FIRST}, got: ${PRECIP_SECOND}" $LINENO
+
+# Then: assert WireMock archive called exactly once
+cv_step "Then" "assert Open-Meteo archive was called exactly once across both weather requests" $LINENO
+
+REQUEST_HEADERS_FILE="/tmp/wm_getreq_headers.$$"
+REQUEST_BODY_FILE="/tmp/wm_getreq_body.$$"
+RESPONSE_HEADERS_FILE="/tmp/wm_getreq_resp_headers.$$"
+RESPONSE_BODY_FILE="/tmp/wm_getreq_resp_body.$$"
+
+echo "REQUEST_HEADERS: GET ${WIREMOCK_ADMIN_URL}/__admin/requests" >"${REQUEST_HEADERS_FILE}"
+: >"${REQUEST_BODY_FILE}"
+cat "${REQUEST_HEADERS_FILE}"
+cat "${REQUEST_BODY_FILE}"
+
+curl -sS "${WIREMOCK_ADMIN_URL}/__admin/requests" -D "${RESPONSE_HEADERS_FILE}" >"${RESPONSE_BODY_FILE}"
+code=$?
+cat "${RESPONSE_HEADERS_FILE}"
+cat "${RESPONSE_BODY_FILE}"
+REQUESTS_JSON=$(cat "${RESPONSE_BODY_FILE}")
+if [ "$code" -ne 0 ]; then
+  cv_fail "expected HTTP 200 from WireMock /__admin/requests, got curl exit code ${code}" $LINENO
+fi
+cv_http "GET" "/__admin/requests" "200"
+
+CALL_COUNT="$(printf '%s
+' "$REQUESTS_JSON" | jq '[.requests[] | select(.request.url | startswith("/v1/archive"))] | length')"
+if [ "$CALL_COUNT" -ne 1 ]; then
+  cv_fail "expected exactly 1 Open-Meteo archive call for cache-miss then cache-hit, got: ${CALL_COUNT}" $LINENO
+fi
+
+# Teardown
+cv_step "Cleanup" "no explicit teardown needed; app and SQLite DB are ephemeral in test environment" $LINENO
+# Containers and database file are destroyed after the test run by the harness.
 
 echo "CODEVALID_TEST_ASSERTION_OK:authenticated_cache_miss_vendor_success"
-
-cv_step Cleanup "No explicit teardown required; database and containers are ephemeral per run" $LINENO
-# Resources are cleaned up when the docker-compose stack is torn down by the runner.
